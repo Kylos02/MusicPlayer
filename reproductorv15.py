@@ -458,124 +458,16 @@ def iniciar_busqueda_letras(estado, titulo, artista):
 
 
 # ==========================================
-# 5b. SPOTIFY CONNECT (librespot)
+# 5b. SPOTIFY CONNECT 
 # ==========================================
-
-SPOTIFY_EVENTS_DIR   = "/tmp/spotify-events"
-_spotify_token        = ""
-_spotify_token_expiry = 0.0
-
-
-def _obtener_token_spotify():
-    global _spotify_token, _spotify_token_expiry
-    if _spotify_token and time.time() < _spotify_token_expiry:
-        return _spotify_token
-        
-    if not SPOTIFY_CLIENT_ID or not SPOTIFY_CLIENT_SECRET:
-        print("⚠️  [Spotify API] Faltan credenciales en el script. Solo obtendrás título y carátula.")
-        return ""
-        
-    try:
-        creds = base64.b64encode(
-            f"{SPOTIFY_CLIENT_ID}:{SPOTIFY_CLIENT_SECRET}".encode()
-        ).decode()
-        
-        # URL oficial corregida
-        req = urllib.request.Request(
-            "https://accounts.spotify.com/api/token",
-            data=b"grant_type=client_credentials",
-            headers={"Authorization": f"Basic {creds}",
-                     "Content-Type": "application/x-www-form-urlencoded"},
-            method="POST",
-        )
-        with urllib.request.urlopen(req, timeout=10, context=SSL_CTX) as resp:
-            data = json.loads(resp.read().decode())
-            
-        _spotify_token        = data["access_token"]
-        _spotify_token_expiry = time.time() + data.get("expires_in", 3600) - 60
-        print("🔑 [Spotify API] Token Autenticado OK")
-        return _spotify_token
-    except Exception as e:
-        print(f"⚠️  [Spotify API] Error al obtener Token: {e}")
-        return ""
-
-
-def obtener_metadata_webapi(track_id):
-    """Spotify Web API: título, artistas, álbum, duración, portada."""
-    tid   = track_id.split(":")[-1] if ":" in track_id else track_id
-    token = _obtener_token_spotify()
-    
-    if not token:
-        return None
-        
-    try:
-        # URL oficial corregida
-        req = urllib.request.Request(
-            f"https://api.spotify.com/v1/tracks/{tid}",
-            headers={"Authorization": f"Bearer {token}"},
-        )
-        with urllib.request.urlopen(req, timeout=8, context=SSL_CTX) as resp:
-            d = json.loads(resp.read().decode())
-            
-        titulo   = d.get("name", "")
-        # Une múltiples artistas si los hay (ej. Daft Punk, Pharrell Williams)
-        artistas = ", ".join(a["name"] for a in d.get("artists", []))
-        album    = d.get("album", {}).get("name", "")
-        dur_ms   = d.get("duration_ms", 0)
-        
-        # Busca la carátula más grande disponible
-        imgs     = d.get("album", {}).get("images", [])
-        cover    = imgs[0]["url"] if imgs else ""
-        
-        print(f"🎵 [Spotify API] Track: {titulo!r} | Artista: {artistas!r} | Álbum: {album!r}")
-        
-        return {
-            "titulo": titulo, 
-            "artista": artistas, 
-            "album": album,
-            "duracion_seg": dur_ms / 1000.0 if dur_ms else None, 
-            "cover_url": cover
-        }
-    except Exception as e:
-        print(f"⚠️  [Spotify API] Error extrayendo metadata: {e}")
-        return None
-
-
-def obtener_info_logs():
-    """Fallback: título y duración desde journalctl de librespot."""
-    titulo = ""
-    duracion_seg = None
-    try:
-        res = subprocess.run(
-            ["journalctl", "-u", "spotify-connect", "-n", "20",
-             "--no-pager", "-o", "cat"],
-            capture_output=True, text=True, timeout=3,
-        )
-        for linea in reversed(res.stdout.split("\n")):
-            m = re.search(r'<(.+?)>\s*\((\d+)\s*ms\)\s*loaded', linea)
-            if m:
-                titulo = m.group(1)
-                duracion_seg = int(m.group(2)) / 1000.0
-                break
-    except Exception:
-        pass
-    return titulo, duracion_seg
-
-
-def descargar_imagen(url):
-    try:
-        req = urllib.request.Request(
-            url, headers={"User-Agent": "RaspberryMusicPlayer/2.0"})
-        with urllib.request.urlopen(req, timeout=8, context=SSL_CTX) as resp:
-            raw = resp.read()
-        img = Image.open(io.BytesIO(raw))
-        if img.mode != "RGB":
-            img = img.convert("RGB")
-        return img.resize((COVER_SIZE, COVER_SIZE))
-    except Exception as e:
-        print(f"⚠️  Error imagen: {e}")
-        return None
-
+import os
+import json
+import time
+import urllib.request
+import urllib.parse
+import base64
+from PIL import Image
+import io
 
 SPOTIFY_EVENTS_DIR = "/tmp/spotify-events"
 
@@ -586,56 +478,174 @@ def leer_archivo_evento(nombre):
     except Exception:
         return ""
 
+# ── Autenticación con la Web API (client credentials) ────────────────────────
+def _obtener_token_spotify():
+    """Obtiene/renueva el access token usando SPOTIFY_CLIENT_ID/SECRET."""
+    global _spotify_token, _spotify_token_expiry
+    if _spotify_token and time.time() < _spotify_token_expiry:
+        return _spotify_token
+
+    if not SPOTIFY_CLIENT_ID or not SPOTIFY_CLIENT_SECRET:
+        print("⚠️  [Spotify API] Faltan credenciales SPOTIFY_CLIENT_ID/SECRET")
+        return ""
+
+    try:
+        creds = base64.b64encode(
+            f"{SPOTIFY_CLIENT_ID}:{SPOTIFY_CLIENT_SECRET}".encode()
+        ).decode()
+        req = urllib.request.Request(
+            "https://accounts.spotify.com/api/token",
+            data=b"grant_type=client_credentials",
+            headers={
+                "Authorization": f"Basic {creds}",
+                "Content-Type": "application/x-www-form-urlencoded",
+            },
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=10, context=SSL_CTX) as resp:
+            data = json.loads(resp.read().decode())
+        _spotify_token        = data["access_token"]
+        _spotify_token_expiry = time.time() + data.get("expires_in", 3600) - 60
+        print("🔑 [Spotify API] Token obtenido correctamente")
+        return _spotify_token
+    except Exception as e:
+        print(f"⚠️  [Spotify API] Error al obtener token: {type(e).__name__}: {e}")
+        return ""
+
+
+def _metadata_desde_webapi(track_id):
+    """Trae título, artista(s), álbum, duración y carátula desde la Web API."""
+    tid = track_id.split(":")[-1] if ":" in track_id else track_id
+    token = _obtener_token_spotify()
+    if not token:
+        return None
+    try:
+        req = urllib.request.Request(
+            f"https://api.spotify.com/v1/tracks/{tid}",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        with urllib.request.urlopen(req, timeout=8, context=SSL_CTX) as resp:
+            d = json.loads(resp.read().decode())
+
+        titulo   = d.get("name", "")
+        artistas = ", ".join(a.get("name", "") for a in d.get("artists", []) if a.get("name"))
+        album_obj = d.get("album", {}) or {}
+        album     = album_obj.get("name", "")
+        dur_ms    = d.get("duration_ms", 0)
+        imgs      = album_obj.get("images", []) or []
+        cover_url = imgs[0]["url"] if imgs else ""
+
+        return {
+            "titulo":       titulo,
+            "artista":      artistas,
+            "album":        album,
+            "duracion_seg": dur_ms / 1000.0 if dur_ms else None,
+            "cover_url":    cover_url,
+        }
+    except Exception as e:
+        print(f"⚠️  [Spotify API] Error extrayendo metadata: {type(e).__name__}: {e}")
+        return None
+
+
+def _metadata_desde_oembed(track_id):
+    """Fallback: oEmbed público. Solo título y carátula (sin artista/álbum/duración)."""
+    tid = track_id.split(":")[-1] if ":" in track_id else track_id
+    try:
+        dominio_seguro = base64.b64decode("b3Blbi5zcG90aWZ5LmNvbQ==").decode()
+        url_oembed = f"https://{dominio_seguro}/oembed?url=spotify:track:{tid}"
+        req = urllib.request.Request(url_oembed, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=8, context=SSL_CTX) as resp:
+            data = json.loads(resp.read().decode())
+        return {
+            "titulo":       data.get("title", ""),
+            "artista":      data.get("author_name", ""),
+            "album":        "",
+            "duracion_seg": None,
+            "cover_url":    data.get("thumbnail_url", ""),
+        }
+    except Exception as e:
+        print(f"⚠️  [Spotify oEmbed] Error: {type(e).__name__}: {e}")
+        return None
+
+
+def _descargar_cover_spotify(url):
+    """Descarga y prepara la carátula para la pantalla."""
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=8, context=SSL_CTX) as resp:
+            raw = resp.read()
+        img = Image.open(io.BytesIO(raw))
+        if img.mode != "RGB":
+            img = img.convert("RGB")
+        return img.resize((COVER_SIZE, COVER_SIZE))
+    except Exception as e:
+        print(f"⚠️  [Spotify] Error descargando carátula: {type(e).__name__}: {e}")
+        return None
+
+
 def hilo_spotify_eventos(estado):
-    print("🎵 [Spotify] Monitor de Eventos Nativo iniciado")
+    print("🎵 [Spotify] Monitor de Eventos Activo")
     ultimo_track_id  = ""
     ultimo_timestamp = ""
-    ultimo_cover_url = ""
-    
+
     while True:
         try:
             ts = leer_archivo_evento("timestamp")
-            # Si no hay timestamp nuevo, esperamos medio segundo
+
             if not ts or ts == ultimo_timestamp:
                 time.sleep(0.5)
                 continue
-                
+
             ultimo_timestamp = ts
             evento      = leer_archivo_evento("event")
             track_id    = leer_archivo_evento("track_id")
             position_ms = leer_archivo_evento("position_ms")
-            
+
             if not track_id:
                 continue
-                
+
             ahora = time.time()
-            
-            # ¿Cambió la canción? Bajamos los datos y la carátula
+
             if track_id != ultimo_track_id:
                 ultimo_track_id = track_id
-                print(f"🎵 [Spotify] Nueva canción: {track_id}")
-                
-                # Llamamos a tu función de la API Web de Spotify que arreglamos antes
-                meta = obtener_metadata_webapi(track_id)
-                if meta:
-                    with estado.lock:
-                        estado.titulo              = meta["titulo"]
-                        estado.artista             = meta["artista"]
-                        estado.album               = meta["album"]
-                        estado.duracion_seg        = meta["duracion_seg"]
-                        estado.hubo_cambio_cancion = True
-                        estado.fuente              = "spotify"
-                        
-                    cover_url = meta["cover_url"]
-                    if cover_url and cover_url != ultimo_cover_url:
-                        ultimo_cover_url = cover_url
-                        cover = descargar_imagen(cover_url)
-                        if cover:
-                            with estado.lock:
-                                estado.cover_spotify        = cover
-                                estado.cover_spotify_cambio = True
+                print(f"\n🎵 [Spotify] Procesando: {track_id}")
 
-            # Controlamos el estado de Pausa/Play y la barra de tiempo
+                # 1) Intentamos la Web API (título + artista + álbum + duración + cover)
+                meta = _metadata_desde_webapi(track_id)
+
+                # 2) Si falla, caemos al oEmbed público (solo título/autor/cover)
+                if meta is None:
+                    print("↩️  [Spotify] Web API falló; usando oEmbed como fallback")
+                    meta = _metadata_desde_oembed(track_id)
+
+                if meta is None:
+                    print("❌ [Spotify] No se pudo obtener metadata")
+                    continue
+
+                titulo   = meta["titulo"]   or "Desconocido"
+                artista  = meta["artista"]  or "Desconocido"
+                album    = meta["album"]    or ""
+                duracion = meta["duracion_seg"]
+                cover_url = meta["cover_url"]
+
+                print(f"✅ Metadata: {titulo} — {artista} | álbum: {album!r} | dur: {duracion}s")
+
+                with estado.lock:
+                    estado.titulo              = titulo
+                    estado.artista             = artista
+                    estado.album               = album
+                    estado.duracion_seg        = duracion
+                    estado.hubo_cambio_cancion = True
+                    estado.fuente              = "spotify"
+
+                if cover_url:
+                    cover_final = _descargar_cover_spotify(cover_url)
+                    if cover_final is not None:
+                        with estado.lock:
+                            estado.cover_spotify        = cover_final
+                            estado.cover_spotify_cambio = True
+
+            # Progreso y botones
             with estado.lock:
                 if estado.fuente == "spotify":
                     if evento == "playing":
@@ -647,10 +657,10 @@ def hilo_spotify_eventos(estado):
                         estado.esta_pausado = True
                     elif evento == "changed":
                         estado.esta_pausado = False
-                        
+
         except Exception as e:
-            pass
-            
+            print(f"⚠️  [Spotify hilo] {type(e).__name__}: {e}")
+
         time.sleep(0.5)
 
 
@@ -932,7 +942,7 @@ class MQTTMiddleware:
                     self.client.publish(
                         MQTT_TOPIC_META,
                         json.dumps({"titulo": snap["titulo"], "artista": snap["artista"],
-                                    "album": snap["album"], "fuente": snap["fuente"]},
+                                    "album": snap["album"], "fuente": snap["fuente"], "duracion": snap["duracion"]},
                                    ensure_ascii=False),
                         retain=True,
                     )
