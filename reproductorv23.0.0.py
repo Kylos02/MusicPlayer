@@ -458,7 +458,7 @@ def iniciar_busqueda_letras(estado, titulo, artista):
 
 
 # ==========================================
-# 5b. SPOTIFY CONNECT 
+# 5b. SPOTIFY CONNECT (Modo Blindado)
 # ==========================================
 import os
 import json
