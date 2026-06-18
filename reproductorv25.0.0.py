@@ -975,20 +975,60 @@ BTN_K2_NEXT  = 23
 GPIO.setup(BTN_K3_PAUSA, GPIO.IN, pull_up_down=GPIO.PUD_UP)
 GPIO.setup(BTN_K2_NEXT,  GPIO.IN, pull_up_down=GPIO.PUD_UP)
 
-def _dbus_cmd(cmd):
-    """Envía comandos a AirPlay/Spotify usando playerctl o dbus."""
-    print(f"📡 Comando enviado: {cmd}")
-    pct_cmd = "play-pause" if cmd == "PlayPause" else ("next" if cmd == "Next" else "previous")
-    
-    os.system(f"playerctl {pct_cmd} >/dev/null 2>&1 &")
-    
-    for dest in ("ShairportSync", "librespot", "raspotify"):
-        os.system(
-            f"dbus-send --system --type=method_call "
-            f"--dest=org.mpris.MediaPlayer2.{dest} "
-            f"/org/mpris/MediaPlayer2 "
-            f"org.mpris.MediaPlayer2.Player.{cmd} >/dev/null 2>&1 &"
-        )
+def _dbus_cmd(cmd, fuente=""):
+    """Envía comandos a los reproductores MPRIS (AirPlay / Spotify / etc.)."""
+    print(f"📡 Comando enviado: {cmd} | Fuente: '{fuente}'")
+    mapping = {
+        "PlayPause": "play-pause",
+        "Next":      "next",
+        "Previous":  "previous",
+    }
+    pct_cmd = mapping.get(cmd, "play-pause")
+
+    # Nombres MPRIS conocidos según la fuente.
+    # librespot/raspotify se exponen normalmente como "spotifyd" o "librespot",
+    # y a veces como "spotify" si está corriendo el cliente oficial.
+    if fuente == "spotify":
+        players = ["spotifyd", "librespot", "spotify"]
+    elif fuente == "airplay":
+        players = ["shairport-sync"]
+    else:
+        players = []
+
+    # 1) Intentamos primero con playerctl apuntando al player específico.
+    enviado = False
+    for p in players:
+        ret = os.system(f"playerctl -p {p} {pct_cmd} >/dev/null 2>&1")
+        if ret == 0:
+            print(f"   ✅ playerctl -p {p} {pct_cmd}")
+            enviado = True
+            break
+
+    # 2) Si no, probamos con dbus-send directo sobre el bus de sesión
+    #    (algunas instalaciones de librespot solo aparecen ahí).
+    if not enviado:
+        dbus_member = {"PlayPause": "PlayPause", "Next": "Next", "Previous": "Previous"}.get(cmd, "PlayPause")
+        for p in players:
+            dest = f"org.mpris.MediaPlayer2.{p}"
+            ret = os.system(
+                f"dbus-send --session --type=method_call "
+                f"--dest={dest} /org/mpris/MediaPlayer2 "
+                f"org.mpris.MediaPlayer2.Player.{dbus_member} >/dev/null 2>&1"
+            )
+            if ret == 0:
+                print(f"   ✅ dbus-send → {dest}.{dbus_member}")
+                enviado = True
+                break
+
+    # 3) Último recurso: playerctl genérico (toma el primer player que encuentre).
+    if not enviado:
+        ret = os.system(f"playerctl {pct_cmd} >/dev/null 2>&1")
+        if ret == 0:
+            print(f"   ✅ playerctl {pct_cmd} (genérico)")
+            enviado = True
+
+    if not enviado:
+        print(f"   ❌ No se pudo enviar '{cmd}' a ningún reproductor MPRIS")
 
 def control_musica(canal):
     """Callback disparado por interrupción de hardware."""
@@ -999,13 +1039,13 @@ def control_musica(canal):
         if fuente == "local":
             reproductor_local.pausar_reanudar()
         else:
-            _dbus_cmd("PlayPause")
+            _dbus_cmd("PlayPause", fuente)
             
     elif canal == BTN_K2_NEXT:
         if fuente == "local":
             reproductor_local.siguiente()
         else:
-            _dbus_cmd("Next")
+            _dbus_cmd("Next", fuente)
 
 # Asignamos las interrupciones a los pines seguros
 GPIO.add_event_detect(BTN_K3_PAUSA, GPIO.FALLING, callback=control_musica, bouncetime=300)
@@ -1541,7 +1581,7 @@ try:
             except Exception:
                 touch_previo = False
 
-        time.sleep(0.25)
+        time.sleep(0)
 
 except KeyboardInterrupt:
     print("\nApagando sistema y liberando pines...")
